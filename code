@@ -132,3 +132,97 @@ function sendSimpleDealsToBitrix() {
     }
   });
 }
+
+function processSurveyResults() {
+  const SHEET_NAME = "Опрос результат";
+  const ID_HEADER = "id";
+  const PROCESSED_AT_HEADER = "Дата обработки";
+  const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook-test/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
+
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+
+  if (!sheet) {
+    Logger.log(`Лист '${SHEET_NAME}' не найден`);
+    return;
+  }
+
+  const lastRow = sheet.getLastRow();
+  const lastColumn = sheet.getLastColumn();
+  Logger.log(`Старт обработки. Лист: '${SHEET_NAME}', lastRow=${lastRow}, lastColumn=${lastColumn}`);
+
+  if (lastRow < 2) {
+    Logger.log("Нет данных для обработки (только заголовки или пустой лист)");
+    return;
+  }
+
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+  const idColumnIndex = headers.findIndex(header => String(header).trim() === ID_HEADER);
+  const processedAtColumnIndex = headers.findIndex(header => String(header).trim() === PROCESSED_AT_HEADER);
+
+  if (idColumnIndex === -1 || processedAtColumnIndex === -1) {
+    Logger.log(`Не найдены обязательные колонки. id: ${idColumnIndex}, Дата обработки: ${processedAtColumnIndex}`);
+    return;
+  }
+
+  const rowCount = lastRow - 1;
+  const data = sheet.getRange(2, 1, rowCount, lastColumn).getValues();
+  Logger.log(`Загружено строк для анализа: ${rowCount}`);
+
+  for (let rowOffset = data.length - 1; rowOffset >= 0; rowOffset--) {
+    const rowNumber = rowOffset + 2;
+    const row = data[rowOffset];
+    const processedAt = row[processedAtColumnIndex];
+
+    if (processedAt) {
+      Logger.log(`Остановка на строке ${rowNumber}: 'Дата обработки' уже заполнена`);
+      break;
+    }
+
+    const clientIdRaw = row[idColumnIndex];
+    const clientId = clientIdRaw === null || clientIdRaw === undefined ? "" : String(clientIdRaw).trim();
+
+    if (!clientId) {
+      Logger.log(`Строка ${rowNumber}: id пустой, пропуск без проставления даты обработки`);
+      continue;
+    }
+
+    const payload = {
+      clientId
+    };
+
+    Logger.log(`Строка ${rowNumber}: отправка webhook для clientId='${clientId}'`);
+
+    try {
+      const response = UrlFetchApp.fetch(WEBHOOK_URL, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+
+      const statusCode = response.getResponseCode();
+      const responseText = response.getContentText();
+
+      Logger.log(`Строка ${rowNumber}: HTTP ${statusCode}, ответ: ${responseText}`);
+
+      if (statusCode >= 200 && statusCode < 300) {
+        sheet.getRange(rowNumber, processedAtColumnIndex + 1).setValue(new Date());
+        Logger.log(`Строка ${rowNumber}: успешно обработана, timestamp записан`);
+      } else {
+        Logger.log(`Строка ${rowNumber}: ошибка webhook, timestamp не записан`);
+      }
+    } catch (error) {
+      Logger.log(`Строка ${rowNumber}: исключение при вызове webhook: ${error}`);
+    }
+  }
+
+  Logger.log("Обработка завершена");
+}
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("Интеграции")
+    .addItem("Обработать Опрос результат", "processSurveyResults")
+    .addToUi();
+}
