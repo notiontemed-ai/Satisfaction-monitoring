@@ -135,8 +135,9 @@ function sendSimpleDealsToBitrix() {
 
 function processSurveyResults() {
   const SHEET_NAME = "Опрос результат";
+  const SOURCE_DATE_HEADER = "date";
   const PROCESSED_AT_HEADER = "Дата обработки";
-  const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook-test/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
+  const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
   const LOG_SHEET_NAME = "Лог n8n";
 
   const requiredHeaders = [
@@ -220,8 +221,31 @@ function processSurveyResults() {
 
   const processedAtColumn = headerIndex[PROCESSED_AT_HEADER];
   const idColumn = headerIndex.id;
+  const sourceDateColumn = headerIndex[SOURCE_DATE_HEADER];
+  let lastDataRow = lastRow;
 
-  for (let rowNumber = lastRow; rowNumber >= 2; rowNumber--) {
+  if (sourceDateColumn) {
+    const dateValues = sheet.getRange(2, sourceDateColumn, lastRow - 1, 1).getValues();
+    lastDataRow = 1;
+
+    for (let i = dateValues.length - 1; i >= 0; i--) {
+      if (toText(dateValues[i][0]).trim() !== "") {
+        lastDataRow = i + 2;
+        break;
+      }
+    }
+
+    if (lastDataRow === 1) {
+      log(`Нет строк с заполненным '${SOURCE_DATE_HEADER}', обработка не требуется`);
+      return;
+    }
+
+    log(`Последняя заполненная строка по колонке '${SOURCE_DATE_HEADER}': ${lastDataRow}`);
+  } else {
+    log(`Колонка '${SOURCE_DATE_HEADER}' не найдена, используется lastRow=${lastRow}`);
+  }
+
+  for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
     const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
     if (toText(processedAtValue).trim() !== "") {
       log(`Остановка на строке ${rowNumber}: 'Дата обработки' уже заполнена`);
