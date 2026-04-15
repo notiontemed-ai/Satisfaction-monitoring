@@ -1,0 +1,134 @@
+// Версия 3.9 — убрано поле 'главный врач', назначается ответственный по ID руководителя, 'Подразделение' теперь получает ID из оргструктуры
+function sendSimpleDealsToBitrix() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Bitrix");
+  const logSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Лог") || SpreadsheetApp.getActiveSpreadsheet().insertSheet("Лог");
+  const headerRow = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+
+  const webhookUrl = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg/crm.item.add.json";
+  const userSearchUrl = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg/user.search.json";
+  const departmentUrl = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg/department.get.json";
+  const stageId = "DT1088_38:CLIENT";
+
+  const fieldMap = {
+    "Комментарий": "ufCrm30_1741341826651",
+    "Ситуация": "ufCrm30_1741341574491",
+    "date": "ufCrm30_1741341999870",
+    "Клиника": "ufCrm30_1741342155339",
+    "Основной сотрудник": "ufCrm30_1743513986",
+    "id": "ufCrm30_1743496140",
+    "Подразделение": "ufCrm30_1743515403"
+  };
+
+  const employeeCache = {};
+  const departmentHeadMap = {}; // Ключ — имя отдела, значение — { id, headId }
+
+  function findEmployeeIdByName(name) {
+    if (employeeCache[name] !== undefined) return employeeCache[name];
+    try {
+      const response = UrlFetchApp.fetch(userSearchUrl + `?FIND=${encodeURIComponent(name)}`);
+      const data = JSON.parse(response.getContentText());
+      const matchedUser = data.result.find(u => `${u.LAST_NAME} ${u.NAME} ${u.SECOND_NAME}`.trim() === name.trim());
+      const userId = matchedUser ? matchedUser.ID : null;
+      employeeCache[name] = userId;
+      return userId;
+    } catch (e) {
+      logSheet.appendRow([new Date(), "Ошибка поиска сотрудника", name, e.toString()]);
+      employeeCache[name] = null;
+      return null;
+    }
+  }
+
+  function loadDepartmentHeads() {
+    try {
+      const response = UrlFetchApp.fetch(departmentUrl);
+      const data = JSON.parse(response.getContentText());
+      if (data.result) {
+        data.result.forEach(dep => {
+          departmentHeadMap[dep.NAME] = {
+            id: dep.ID,
+            headId: dep.UF_HEAD || null
+          };
+        });
+        logSheet.appendRow([new Date(), "Загружены руководители подразделений", JSON.stringify(departmentHeadMap)]);
+      }
+    } catch (e) {
+      logSheet.appendRow([new Date(), "Ошибка при загрузке отделов", e.toString()]);
+    }
+  }
+
+  loadDepartmentHeads();
+
+  rows.forEach((row, rowIndex) => {
+    const timestamp = row[0];
+    const marker = row[1];
+
+    if (timestamp || !marker) return;
+
+    logSheet.appendRow([new Date(), `Версия 3.9: обработка строки #${rowIndex + 2}`]);
+
+    const fields = {
+      title: `Протокол ЧП #${new Date().getTime()}`,
+      stageId
+    };
+
+    headerRow.forEach((columnName, colIndex) => {
+      const value = row[colIndex];
+      const bitrixCode = fieldMap[columnName];
+
+      if (!bitrixCode && value !== "" && value !== null) {
+        logSheet.appendRow([new Date(), `Нет сопоставления поля`, `Колонка: '${columnName}', Значение: '${value}'`]);
+      }
+
+      if (bitrixCode && value !== "" && value !== null) {
+        if (bitrixCode === "ufCrm30_1741342155339") {
+          const clinicName = value;
+          const department = departmentHeadMap[clinicName];
+          if (department) {
+            fields.assignedById = department.headId;
+            fields["ufCrm30_1743515403"] = department.id; // Подразделение ID
+          } else {
+            logSheet.appendRow([new Date(), `Не найден руководитель`, `Клиника: '${clinicName}'`]);
+          }
+        } else {
+          fields[bitrixCode] = typeof value === "string" ? value : String(value);
+        }
+      }
+    });
+
+    const payload = {
+      entityTypeId: 1088,
+      fields
+    };
+
+    logSheet.appendRow([new Date(), "Payload", JSON.stringify(payload)]);
+
+    try {
+      const response = UrlFetchApp.fetch(webhookUrl, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
+      });
+
+      const rawText = response.getContentText();
+      const data = JSON.parse(rawText);
+      const status = response.getResponseCode();
+
+      logSheet.appendRow([new Date(), "HTTP статус", status]);
+      logSheet.appendRow([new Date(), "Ответ", rawText]);
+
+      const createdItem = data?.result?.item || {};
+      logSheet.appendRow([new Date(), "Созданный объект", JSON.stringify(createdItem)]);
+
+      if (status === 200 && createdItem.id) {
+        sheet.getRange(rowIndex + 2, 1).setValue(new Date());
+        logSheet.appendRow([new Date(), `Успешно создана сделка ID: ${createdItem.id}`]);
+      } else {
+        logSheet.appendRow([new Date(), "Ошибка", JSON.stringify(data)]);
+      }
+    } catch (e) {
+      logSheet.appendRow([new Date(), "Исключение", e.toString()]);
+    }
+  });
+}
