@@ -135,6 +135,7 @@ function sendSimpleDealsToBitrix() {
 
 function processSurveyResults() {
   const SHEET_NAME = "Опрос результат";
+  const DATE_HEADER = "date";
   const ID_HEADER = "id";
   const PROCESSED_AT_HEADER = "Дата обработки";
   const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook-test/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
@@ -165,11 +166,12 @@ function processSurveyResults() {
   }
 
   const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+  const dateColumnIndex = headers.findIndex(header => String(header).trim() === DATE_HEADER);
   const idColumnIndex = headers.findIndex(header => String(header).trim() === ID_HEADER);
   const processedAtColumnIndex = headers.findIndex(header => String(header).trim() === PROCESSED_AT_HEADER);
 
-  if (idColumnIndex === -1 || processedAtColumnIndex === -1) {
-    log(`Не найдены обязательные колонки. id: ${idColumnIndex}, Дата обработки: ${processedAtColumnIndex}`);
+  if (dateColumnIndex === -1 || idColumnIndex === -1 || processedAtColumnIndex === -1) {
+    log(`Не найдены обязательные колонки. date: ${dateColumnIndex}, id: ${idColumnIndex}, Дата обработки: ${processedAtColumnIndex}`);
     return;
   }
 
@@ -177,7 +179,24 @@ function processSurveyResults() {
   const data = sheet.getRange(2, 1, rowCount, lastColumn).getValues();
   log(`Загружено строк для анализа: ${rowCount}`);
 
+  let lastRowOffsetWithDate = -1;
   for (let rowOffset = data.length - 1; rowOffset >= 0; rowOffset--) {
+    const dateValue = data[rowOffset][dateColumnIndex];
+    const hasDate = dateValue !== null && dateValue !== undefined && String(dateValue).trim() !== "";
+    if (hasDate) {
+      lastRowOffsetWithDate = rowOffset;
+      break;
+    }
+  }
+
+  if (lastRowOffsetWithDate === -1) {
+    log(`Нет строк с непустым значением в колонке '${DATE_HEADER}', обработка остановлена`);
+    return;
+  }
+
+  log(`Последняя строка с непустым '${DATE_HEADER}': ${lastRowOffsetWithDate + 2}`);
+
+  for (let rowOffset = lastRowOffsetWithDate; rowOffset >= 0; rowOffset--) {
     const rowNumber = rowOffset + 2;
     const row = data[rowOffset];
     const processedAt = row[processedAtColumnIndex];
