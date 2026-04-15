@@ -135,11 +135,37 @@ function sendSimpleDealsToBitrix() {
 
 function processSurveyResults() {
   const SHEET_NAME = "Опрос результат";
-  const DATE_HEADER = "date";
-  const ID_HEADER = "id";
   const PROCESSED_AT_HEADER = "Дата обработки";
   const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook-test/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
   const LOG_SHEET_NAME = "Лог n8n";
+
+  const requiredHeaders = [
+    "id",
+    "Дата обработки",
+    "Основной сотрудник",
+    "Пациент",
+    "Комментарий для врача",
+    "Комментарий для администратора",
+    "Телефон",
+    "Статус Клиента",
+    "Дата установки статуса",
+    "Клиника",
+    "Email",
+    "Дата последнего визита"
+  ];
+
+  const responseToHeaderMap = {
+    mainEmployee: "Основной сотрудник",
+    patient: "Пациент",
+    doctorComment: "Комментарий для врача",
+    adminComment: "Комментарий для администратора",
+    phone: "Телефон",
+    clientStatus: "Статус Клиента",
+    statusDate: "Дата установки статуса",
+    clinic: "Клиника",
+    email: "Email",
+    lastVisitDate: "Дата последнего визита"
+  };
 
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = spreadsheet.getSheetByName(SHEET_NAME);
@@ -149,6 +175,21 @@ function processSurveyResults() {
     const detailsText = details === undefined ? "" : String(details);
     Logger.log(`${message}${detailsText ? ` | ${detailsText}` : ""}`);
     logSheet.appendRow([new Date(), message, detailsText]);
+  }
+
+  function toText(value) {
+    if (value === null || value === undefined) return "";
+    return typeof value === "string" ? value : String(value);
+  }
+
+  function normalizePhone(value) {
+    if (Array.isArray(value)) {
+      return value.map(item => toText(item).trim()).filter(Boolean).join(", ");
+    }
+    if (value && typeof value === "object") {
+      return Object.values(value).map(item => toText(item).trim()).filter(Boolean).join(", ");
+    }
+    return toText(value);
   }
 
   if (!sheet) {
@@ -165,101 +206,96 @@ function processSurveyResults() {
     return;
   }
 
-  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
-  const dateColumnIndex = headers.findIndex(header => String(header).trim() === DATE_HEADER);
-  const idColumnIndex = headers.findIndex(header => String(header).trim() === ID_HEADER);
-  const processedAtColumnIndex = headers.findIndex(header => String(header).trim() === PROCESSED_AT_HEADER);
+  const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(h => toText(h).trim());
+  const headerIndex = {};
+  headers.forEach((header, idx) => {
+    if (header) headerIndex[header] = idx + 1;
+  });
 
-  if (dateColumnIndex === -1 || idColumnIndex === -1 || processedAtColumnIndex === -1) {
-    log(`Не найдены обязательные колонки. date: ${dateColumnIndex}, id: ${idColumnIndex}, Дата обработки: ${processedAtColumnIndex}`);
+  const missingHeaders = requiredHeaders.filter(header => !headerIndex[header]);
+  if (missingHeaders.length > 0) {
+    log("Не найдены обязательные колонки", missingHeaders.join(", "));
     return;
   }
 
-  const rowCount = lastRow - 1;
-  const data = sheet.getRange(2, 1, rowCount, lastColumn).getValues();
-  log(`Загружено строк для анализа: ${rowCount}`);
+  const processedAtColumn = headerIndex[PROCESSED_AT_HEADER];
+  const idColumn = headerIndex.id;
 
-  let lastRowOffsetWithDate = -1;
-  for (let rowOffset = data.length - 1; rowOffset >= 0; rowOffset--) {
-    const dateValue = data[rowOffset][dateColumnIndex];
-    const hasDate = dateValue !== null && dateValue !== undefined && String(dateValue).trim() !== "";
-    if (hasDate) {
-      lastRowOffsetWithDate = rowOffset;
-      break;
-    }
-  }
-
-  if (lastRowOffsetWithDate === -1) {
-    log(`Нет строк с непустым значением в колонке '${DATE_HEADER}', обработка остановлена`);
-    return;
-  }
-
-  log(`Последняя строка с непустым '${DATE_HEADER}': ${lastRowOffsetWithDate + 2}`);
-
-  for (let rowOffset = lastRowOffsetWithDate; rowOffset >= 0; rowOffset--) {
-    const rowNumber = rowOffset + 2;
-    const row = data[rowOffset];
-    const processedAt = row[processedAtColumnIndex];
-
-    if (processedAt) {
+  for (let rowNumber = lastRow; rowNumber >= 2; rowNumber--) {
+    const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
+    if (toText(processedAtValue).trim() !== "") {
       log(`Остановка на строке ${rowNumber}: 'Дата обработки' уже заполнена`);
       break;
     }
 
-    const clientIdRaw = row[idColumnIndex];
-    const clientId = clientIdRaw === null || clientIdRaw === undefined ? "" : String(clientIdRaw).trim();
-
+    const clientId = toText(sheet.getRange(rowNumber, idColumn).getValue()).trim();
     if (!clientId) {
-      log(`Строка ${rowNumber}: id пустой, пропуск без проставления даты обработки`);
+      const errorText = "Ошибка: пустой id";
+      sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+      log(`Строка ${rowNumber}: ${errorText}`);
       continue;
     }
 
-    const payload = {
-      clientId
-    };
-
-    log(`Строка ${rowNumber}: отправка webhook для clientId='${clientId}'`);
+    const payload = { clientId };
+    log(`Строка ${rowNumber}: отправка webhook`, JSON.stringify(payload));
 
     try {
       const response = UrlFetchApp.fetch(WEBHOOK_URL, {
         method: "post",
         contentType: "application/json",
-        payload: JSON.stringify(payload)
+        payload: JSON.stringify(payload),
+        muteHttpExceptions: true
       });
 
       const statusCode = response.getResponseCode();
-      const responseText = (response.getContentText() || "").trim();
-      let responseJson = null;
-      let parseError = null;
+      const responseText = toText(response.getContentText()).trim();
+      log(`Строка ${rowNumber}: HTTP ${statusCode}`, responseText || "<пустой ответ>");
 
-      if (responseText) {
-        try {
-          responseJson = JSON.parse(responseText);
-        } catch (error) {
-          parseError = error;
-        }
+      if (!(statusCode >= 200 && statusCode < 300)) {
+        const errorText = `Ошибка HTTP ${statusCode}`;
+        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+        log(`Строка ${rowNumber}: ${errorText}`);
+        continue;
       }
 
-      log(`Строка ${rowNumber}: HTTP ${statusCode}, ответ: ${responseText || "<пусто>"}`);
-
-      const isHttpOk = statusCode >= 200 && statusCode < 300;
-      const isBodyPresent = responseText.length > 0;
-      const isJsonValid = !!responseJson && !parseError;
-      const hasN8nFields = isJsonValid && (responseJson.executionId || responseJson.message || responseJson.status);
-
-      if (isHttpOk && isBodyPresent && isJsonValid && hasN8nFields) {
-        sheet.getRange(rowNumber, processedAtColumnIndex + 1).setValue(new Date());
-        log(`Строка ${rowNumber}: успешно обработана, timestamp записан`);
-      } else {
-        const reasons = [];
-        if (!isHttpOk) reasons.push(`HTTP=${statusCode}`);
-        if (!isBodyPresent) reasons.push("пустой ответ");
-        if (parseError) reasons.push(`некорректный JSON: ${parseError}`);
-        if (isJsonValid && !hasN8nFields) reasons.push("в JSON нет признаков ответа n8n");
-        log(`Строка ${rowNumber}: ошибка webhook, timestamp не записан`, reasons.join("; "));
+      if (!responseText) {
+        const errorText = "Ошибка: пустой ответ webhook";
+        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+        log(`Строка ${rowNumber}: ${errorText}`);
+        continue;
       }
+
+      let body;
+      try {
+        body = JSON.parse(responseText);
+      } catch (parseError) {
+        const errorText = `Ошибка: некорректный JSON (${parseError})`;
+        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+        log(`Строка ${rowNumber}: ${errorText}`);
+        continue;
+      }
+
+      if (!body || typeof body !== "object") {
+        const errorText = "Ошибка: webhook вернул некорректный объект";
+        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+        log(`Строка ${rowNumber}: ${errorText}`);
+        continue;
+      }
+
+      Object.keys(responseToHeaderMap).forEach(responseKey => {
+        const targetHeader = responseToHeaderMap[responseKey];
+        const targetColumn = headerIndex[targetHeader];
+        const rawValue = body[responseKey];
+        const value = responseKey === "phone" ? normalizePhone(rawValue) : toText(rawValue);
+        sheet.getRange(rowNumber, targetColumn).setValue(value);
+      });
+
+      sheet.getRange(rowNumber, processedAtColumn).setValue(new Date());
+      log(`Строка ${rowNumber}: данные записаны, timestamp установлен`);
     } catch (error) {
-      log(`Строка ${rowNumber}: исключение при вызове webhook: ${error}`);
+      const errorText = `Ошибка запроса: ${error}`;
+      sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+      log(`Строка ${rowNumber}: ${errorText}`);
     }
   }
 
