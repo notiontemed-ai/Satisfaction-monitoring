@@ -75,20 +75,6 @@ function processSurveyResults() {
     return /(^|\s)(ошибка|error)\b/i.test(text);
   }
 
-  function isProcessedAtInExpectedFormat(value) {
-    const text = toText(value).trim();
-    if (!text) return false;
-    return /^\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}:\d{2}$/.test(text);
-  }
-
-  function hasErrorInMappedFields(rowValues, headerIndexMap, responseMap) {
-    return Object.keys(responseMap).some(responseKey => {
-      const header = responseMap[responseKey];
-      const value = getCellByHeader(rowValues, headerIndexMap, header, 1);
-      return isErrorValue(value);
-    });
-  }
-
   function normalizePhone(value) {
     if (Array.isArray(value)) {
       return value.map(item => toText(item).trim()).filter(Boolean).join(", ");
@@ -507,27 +493,21 @@ function processSurveyResults() {
   }
 
   for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
-    const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
     const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
     const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
     const processedAtText = toText(processedAtValue).trim();
     const bitrixText = toText(bitrixValue).trim();
-    const hasProcessedAtError = isErrorValue(processedAtValue) || (processedAtText !== "" && !isProcessedAtInExpectedFormat(processedAtValue));
+    const hasProcessedAtError = isErrorValue(processedAtValue);
     const hasBitrixError = isErrorValue(bitrixValue);
-    const hasMappedFieldError = hasErrorInMappedFields(rowValues, headerIndexMap, responseToHeaderMap);
 
-    const rowHasError = hasProcessedAtError || hasBitrixError || hasMappedFieldError;
+    const rowHasError = hasProcessedAtError || hasBitrixError;
 
     if (processedAtText !== "" && hasProcessedAtError) {
-      log(`Строка ${rowNumber}: 'Дата обработки' содержит ошибку или неверный формат, повторная обработка`);
+      log(`Строка ${rowNumber}: найдена ошибка в 'Дата обработки', повторная обработка`);
     }
 
     if (bitrixText !== "" && hasBitrixError) {
       log(`Строка ${rowNumber}: найдена ошибка в 'bitrix', повторная обработка`);
-    }
-
-    if (hasMappedFieldError) {
-      log(`Строка ${rowNumber}: найдена ошибка в полях данных клиента, повторная обработка`);
     }
 
     if (!rowHasError && processedAtText !== "") {
@@ -607,12 +587,12 @@ function processSurveyResults() {
         sheet.getRange(rowNumber, targetColumn).setValue(value);
       });
 
-      const updatedRowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
-      const taskDecision = shouldCreateTask(updatedRowValues, headerIndexMap);
+      const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+      const taskDecision = shouldCreateTask(rowValues, headerIndexMap);
 
       if (taskDecision.hasLowScore || taskDecision.hasQuestion) {
         try {
-          const taskResult = createBitrixTaskForRow(updatedRowValues, headerIndexMap);
+          const taskResult = createBitrixTaskForRow(rowValues, headerIndexMap);
           sheet.getRange(rowNumber, bitrixColumn).setValue(taskResult);
           log(`Строка ${rowNumber}: задача создана`, taskResult);
         } catch (taskError) {
@@ -625,8 +605,7 @@ function processSurveyResults() {
         log(`Строка ${rowNumber}: задача не требуется`);
       }
 
-      const processedStamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
-      sheet.getRange(rowNumber, processedAtColumn).setValue(processedStamp);
+      sheet.getRange(rowNumber, processedAtColumn).setValue(new Date());
       log(`Строка ${rowNumber}: данные записаны, timestamp установлен`);
     } catch (error) {
       const errorText = `Ошибка запроса: ${error}`;
