@@ -638,6 +638,7 @@ function createTestBitrixTaskFromRow253() {
   });
 
   const hasLowScore = qa.some(item => isLowScore(item.score));
+  const requiresResultFlag = hasLowScore;
 
   const descriptionLines = [
     `[B]Пациент[/B]: ${patient || "-"}`,
@@ -697,6 +698,13 @@ function createTestBitrixTaskFromRow253() {
       DEADLINE: deadlineIso
     }
   };
+
+  if (requiresResultFlag) {
+    payload.fields.SE_PARAMETER = [{ CODE: 3 }];
+    payload.fields.PRIORITY = "2";
+    log("Флаг \"Требуется результат\" включен", "Добавлен SE_PARAMETER с CODE 3");
+    log("Задача отмечена как важная", "Добавлен PRIORITY=2 для задачи с низкой оценкой");
+  }
 
   log("Payload задачи", JSON.stringify(payload));
 
