@@ -326,9 +326,290 @@ function processSurveyResults() {
   log("Обработка завершена");
 }
 
+function createTestBitrixTaskFromRow253() {
+  const SHEET_NAME = "Bitrix";
+  const LOG_SHEET_NAME = "Лог";
+  const TARGET_ROW = 253;
+  const WEBHOOK_BASE = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg";
+  const TASK_ADD_URL = `${WEBHOOK_BASE}/tasks.task.add.json`;
+  const USER_SEARCH_URL = `${WEBHOOK_BASE}/user.search.json`;
+  const DEPARTMENT_URL = `${WEBHOOK_BASE}/department.get.json`;
+  const OBSERVER_FIO = "Данилевич Екатерина Юрьевна";
+
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  const logSheet = spreadsheet.getSheetByName(LOG_SHEET_NAME) || spreadsheet.insertSheet(LOG_SHEET_NAME);
+
+  function log(message, details) {
+    const detailsText = details === undefined ? "" : String(details);
+    Logger.log(`${message}${detailsText ? ` | ${detailsText}` : ""}`);
+    logSheet.appendRow([new Date(), `[Row253 Task] ${message}`, detailsText]);
+  }
+
+  function toText(value) {
+    if (value === null || value === undefined) return "";
+    return typeof value === "string" ? value : String(value);
+  }
+
+  function normalizeClinicName(name) {
+    return toText(name).trim().replace(/^Темед\s+/i, "").trim();
+  }
+
+  function addBusinessDays(date, days) {
+    const result = new Date(date);
+    let added = 0;
+    while (added < days) {
+      result.setDate(result.getDate() + 1);
+      const day = result.getDay();
+      if (day !== 0 && day !== 6) added += 1;
+    }
+    return result;
+  }
+
+  function scoreEmoji(rawScore) {
+    const numeric = Number(toText(rawScore).replace(",", "."));
+    if (!Number.isFinite(numeric)) return "⚪";
+    if (numeric <= 2) return "🔴";
+    if (numeric === 3) return "🟡";
+    return "🟢";
+  }
+
+  function buildHeaderIndexMap(headers) {
+    const map = {};
+    headers.forEach((header, idx) => {
+      const key = toText(header).trim();
+      if (!key) return;
+      if (!map[key]) map[key] = [];
+      map[key].push(idx);
+    });
+    return map;
+  }
+
+  function getCellByHeader(rowValues, headerIndexMap, header, occurrence) {
+    const positions = headerIndexMap[header] || [];
+    const index = positions[occurrence - 1];
+    if (index === undefined) return "";
+    return rowValues[index];
+  }
+
+  function getDepartmentByClinic(clinicName) {
+    const response = UrlFetchApp.fetch(DEPARTMENT_URL, { muteHttpExceptions: true });
+    const status = response.getResponseCode();
+    const raw = response.getContentText();
+    log("HTTP статус department.get", status);
+    log("Ответ department.get", raw);
+
+    if (status < 200 || status >= 300) {
+      throw new Error(`department.get вернул HTTP ${status}`);
+    }
+
+    const body = JSON.parse(raw);
+    const departments = body.result || [];
+    const exact = departments.find(dep => toText(dep.NAME).trim() === clinicName);
+    if (exact) return exact;
+
+    const normalized = normalizeClinicName(clinicName);
+    log("Нормализованная клиника", normalized);
+    return departments.find(dep => toText(dep.NAME).trim() === normalized) || null;
+  }
+
+  function findObserverIdByFio(fio) {
+    const response = UrlFetchApp.fetch(`${USER_SEARCH_URL}?FIND=${encodeURIComponent(fio)}`, {
+      muteHttpExceptions: true
+    });
+    const status = response.getResponseCode();
+    const raw = response.getContentText();
+    log("HTTP статус user.search", status);
+    log("Ответ user.search", raw);
+
+    if (status < 200 || status >= 300) {
+      throw new Error(`user.search вернул HTTP ${status}`);
+    }
+
+    const body = JSON.parse(raw);
+    const users = body.result || [];
+    const found = users.find(user => {
+      const fullName = `${toText(user.LAST_NAME)} ${toText(user.NAME)} ${toText(user.SECOND_NAME)}`.trim();
+      return fullName === fio;
+    });
+    return found ? toText(found.ID).trim() : null;
+  }
+
+  function formatDate(value) {
+    if (!value) return "";
+    if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value.getTime())) {
+      return Utilities.formatDate(value, Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm");
+    }
+    return toText(value);
+  }
+
+  if (!sheet) {
+    log(`Лист '${SHEET_NAME}' не найден`);
+    return;
+  }
+
+  const startAt = new Date();
+  log("Запуск функции", `row=${TARGET_ROW}`);
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const headerIndexMap = buildHeaderIndexMap(headers);
+  const rowValues = sheet.getRange(TARGET_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
+
+  const clinic = toText(getCellByHeader(rowValues, headerIndexMap, "Клиника", 1)).trim();
+  log("Найденная клиника", clinic);
+  if (!clinic) {
+    log("Ошибка", "В строке 253 пустое поле 'Клиника'");
+    return;
+  }
+
+  const department = getDepartmentByClinic(clinic);
+  if (!department) {
+    log("Ошибка", `Подразделение для клиники '${clinic}' не найдено`);
+    return;
+  }
+
+  const responsibleIdRaw = department.UF_HEAD;
+  const responsibleId = Array.isArray(responsibleIdRaw) ? toText(responsibleIdRaw[0]).trim() : toText(responsibleIdRaw).trim();
+  log("Найденный RESPONSIBLE_ID", responsibleId);
+  if (!responsibleId) {
+    log("Ошибка", `UF_HEAD пустой для подразделения '${department.NAME}'`);
+    return;
+  }
+
+  const observerId = findObserverIdByFio(OBSERVER_FIO);
+  log("Найденный observer ID", observerId || "<не найден>");
+  if (!observerId) {
+    log("Ошибка", `Пользователь '${OBSERVER_FIO}' не найден по точному совпадению ФИО`);
+    return;
+  }
+
+  const deadline = addBusinessDays(startAt, 3);
+  const deadlineIso = deadline.toISOString();
+  log("Рассчитанный дедлайн", deadlineIso);
+
+  const patient = toText(getCellByHeader(rowValues, headerIndexMap, "Пациент", 1)).trim();
+  const clientId = toText(getCellByHeader(rowValues, headerIndexMap, "id", 1)).trim();
+  const doctor = toText(getCellByHeader(rowValues, headerIndexMap, "Основной сотрудник", 1)).trim();
+  const phone = toText(getCellByHeader(rowValues, headerIndexMap, "Телефон", 1)).trim();
+  const email = toText(getCellByHeader(rowValues, headerIndexMap, "Email", 1)).trim();
+  const surveyDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "date", 1));
+  const clientStatus = toText(getCellByHeader(rowValues, headerIndexMap, "Статус Клиента", 1)).trim();
+  const statusDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата установки статуса", 1));
+  const lastVisitDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата последнего визита", 1));
+  const chiefDoctorQuestion = toText(getCellByHeader(rowValues, headerIndexMap, "Вопрос главному врачу", 1)).trim();
+  const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Предпочтительный способ ответа", 1)).trim();
+  const doctorComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для врача", 1)).trim();
+  const adminComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для администратора", 1)).trim();
+  const doc = toText(getCellByHeader(rowValues, headerIndexMap, "doc", 1)).trim();
+  const month = toText(getCellByHeader(rowValues, headerIndexMap, "Месяц", 1)).trim();
+
+  const qa = [
+    "Как вы оцениваете общее состояние своего здоровья?",
+    "Вы достигли цели лечения?",
+    "Как бы вы описали свое текущее состояние?",
+    "Как проходило обсуждение плана лечения?",
+    "Лечение прошло так, как вы ожидали?",
+    "Вам хватило общения со своим лечащим врачом?",
+    "Чувствовали ли вы, что о вас заботятся на протяжении лечения?",
+    "Как бы вы оценили лечение в нашей клинике?"
+  ].map((questionText, index) => {
+    const answer = toText(getCellByHeader(rowValues, headerIndexMap, questionText, 1)).trim();
+    const score = toText(getCellByHeader(rowValues, headerIndexMap, "Оценка", index + 1)).trim();
+    return {
+      questionText,
+      answer,
+      score,
+      emoji: scoreEmoji(score)
+    };
+  });
+
+  const descriptionLines = [
+    `[B]Пациент:[/B] ${patient}`,
+    `[B]ID клиента:[/B] ${clientId}`,
+    `[B]Клиника:[/B] ${clinic}`,
+    `[B]Лечащий врач:[/B] ${doctor}`,
+    `[B]Телефон:[/B] ${phone}`,
+    `[B]Email:[/B] ${email}`,
+    `[B]Дата опроса:[/B] ${surveyDate}`,
+    `[B]Статус клиента:[/B] ${clientStatus}`,
+    `[B]Дата установки статуса:[/B] ${statusDate}`,
+    `[B]Дата последнего визита:[/B] ${lastVisitDate}`,
+    "",
+    "[B]Ответы пациента[/B]"
+  ];
+
+  qa.forEach(item => {
+    descriptionLines.push("");
+    descriptionLines.push(`[B]${item.questionText}[/B]`);
+    descriptionLines.push(item.answer || "-");
+    descriptionLines.push(`Оценка: ${item.emoji} ${item.score || "-"}`);
+  });
+
+  descriptionLines.push(
+    "",
+    "[B]Вопрос главному врачу[/B]",
+    `[B]Текст вопроса:[/B] ${chiefDoctorQuestion || "-"}`,
+    `[B]Предпочтительный способ ответа:[/B] ${preferredResponse || "-"}`,
+    "",
+    "[B]Комментарии[/B]",
+    `[B]Комментарий для врача:[/B] ${doctorComment || "-"}`,
+    `[B]Комментарий для администратора:[/B] ${adminComment || "-"}`,
+    "",
+    "[B]Служебные данные[/B]",
+    `[B]doc:[/B] ${doc || "-"}`,
+    `[B]Месяц:[/B] ${month || "-"}`
+  );
+
+  const titleDate = surveyDate || Utilities.formatDate(startAt, Session.getScriptTimeZone(), "dd.MM.yyyy");
+  const title = `Опрос пациента: ${patient || "Без имени"} / ${clinic || "Без клиники"} / ${titleDate}`;
+
+  const payload = {
+    fields: {
+      TITLE: title,
+      DESCRIPTION: descriptionLines.join("\n"),
+      DESCRIPTION_IN_BBCODE: "Y",
+      RESPONSIBLE_ID: responsibleId,
+      AUDITORS: [observerId],
+      DEADLINE: deadlineIso
+    }
+  };
+
+  log("Payload задачи", JSON.stringify(payload));
+
+  try {
+    const response = UrlFetchApp.fetch(TASK_ADD_URL, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    const status = response.getResponseCode();
+    const raw = response.getContentText();
+    log("HTTP статус tasks.task.add", status);
+    log("Ответ tasks.task.add", raw);
+
+    const body = JSON.parse(raw);
+    const taskId = toText(body?.result?.task?.id || body?.result?.id || body?.result).trim();
+    if (status >= 200 && status < 300 && taskId) {
+      log("ID созданной задачи", taskId);
+      const sentColumnIndex = (headerIndexMap["Отправлено в Битрикс"] || [])[0];
+      if (sentColumnIndex !== undefined) {
+        const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+        sheet.getRange(TARGET_ROW, sentColumnIndex + 1).setValue(`TASK ${taskId} ${stamp}`);
+      }
+    } else {
+      log("Ошибка при создании задачи", raw);
+    }
+  } catch (error) {
+    log("Исключение", error && error.stack ? error.stack : String(error));
+  }
+}
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Интеграции")
     .addItem("Обработать Опрос результат", "processSurveyResults")
+    .addItem("Тест: задача Bitrix из строки 253", "createTestBitrixTaskFromRow253")
     .addToUi();
 }
