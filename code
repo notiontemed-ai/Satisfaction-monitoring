@@ -1,5 +1,6 @@
 function processSurveyResults() {
   const SHEET_NAME = "Опрос результат";
+  const MAX_ROWS_TO_CHECK = 15;
   const SOURCE_DATE_HEADER = "date";
   const PROCESSED_AT_HEADER = "Дата обработки";
   const BITRIX_RESULT_HEADER = "bitrix";
@@ -509,7 +510,10 @@ function processSurveyResults() {
     log(`Последняя заполненная строка по колонке '${SOURCE_DATE_HEADER}': ${lastDataRow}`);
   }
 
-  for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
+  const firstRowToCheck = Math.max(2, lastDataRow - MAX_ROWS_TO_CHECK + 1);
+  log(`Проверяем последние ${MAX_ROWS_TO_CHECK} записей: строки ${firstRowToCheck}-${lastDataRow}`);
+
+  for (let rowNumber = lastDataRow; rowNumber >= firstRowToCheck; rowNumber--) {
     const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
     const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
     const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
