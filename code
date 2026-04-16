@@ -638,7 +638,7 @@ function createTestBitrixTaskFromRow253() {
   });
 
   const hasLowScore = qa.some(item => isLowScore(item.score));
-  const requiresResultFlag = hasLowScore;
+  log("hasLowScore", hasLowScore ? "true" : "false");
 
   const descriptionLines = [
     `[B]Пациент[/B]: ${patient || "-"}`,
@@ -699,14 +699,16 @@ function createTestBitrixTaskFromRow253() {
     }
   };
 
-  if (requiresResultFlag) {
-    payload.fields.SE_PARAMETER = [{ CODE: 3 }];
+  if (hasLowScore) {
     payload.fields.PRIORITY = "2";
-    log("Флаг \"Требуется результат\" включен", "Добавлен SE_PARAMETER с CODE 3");
+    payload.fields.TASK_CONTROL = "Y";
+    payload.SE_PARAMETER = [{ CODE: 3, VALUE: "Y" }];
+    log("Включен флаг 'Требуется результат'");
+    log("Включена приёмка постановщиком");
     log("Задача отмечена как важная", "Добавлен PRIORITY=2 для задачи с низкой оценкой");
   }
 
-  log("Payload задачи", JSON.stringify(payload));
+  log("Итоговый payload", JSON.stringify(payload));
 
   try {
     const response = UrlFetchApp.fetch(TASK_ADD_URL, {
