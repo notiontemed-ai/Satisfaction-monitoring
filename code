@@ -216,34 +216,34 @@ function processSurveyResults() {
   }
 
   function shouldCreateTask(rowValues, headerIndexMap) {
-  const careScore = getValueByHeader(
-    rowValues,
-    headerIndexMap,
-    "Чувствовали ли вы, что о вас заботятся на протяжении лечения?",
-    2
-  );
-
-  const clinicScore = getValueByHeader(
-    rowValues,
-    headerIndexMap,
-    "Как бы вы оценили лечение в нашей клинике?",
-    1
-  );
-
-  const chiefDoctorQuestionRaw = toText(
-    getValueByHeader(
+    const careScore = getCellByHeader(
       rowValues,
       headerIndexMap,
-      "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение",
-      1
-    )
-  ).trim();
+      "Чувствовали ли вы, что о вас заботятся на протяжении лечения?",
+      2
+    );
 
-  return {
-    hasLowScore: isLowScore(careScore) || isLowScore(clinicScore),
-    hasQuestion: chiefDoctorQuestionRaw !== ""
-  };
-}
+    const clinicScore = getCellByHeader(
+      rowValues,
+      headerIndexMap,
+      "Как бы вы оценили лечение в нашей клинике?",
+      1
+    );
+
+    const chiefDoctorQuestionRaw = toText(
+      getCellByHeader(
+        rowValues,
+        headerIndexMap,
+        "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение",
+        1
+      )
+    ).trim();
+
+    return {
+      hasLowScore: isLowScore(careScore) || isLowScore(clinicScore),
+      hasQuestion: chiefDoctorQuestionRaw !== ""
+    };
+  }
 
   function createBitrixTaskForRow(rowValues, headerIndexMap) {
     const startAt = new Date();
@@ -333,7 +333,15 @@ function processSurveyResults() {
       emoji: scoreEmoji(clinicScoreRaw)
     });
 
-    const hasLowScore = qa.some(item => isLowScore(item.score));
+    const careScoreRaw = toText(
+      getCellByHeader(
+        rowValues,
+        headerIndexMap,
+        "Чувствовали ли вы, что о вас заботятся на протяжении лечения?",
+        2
+      )
+    ).trim();
+    const hasLowScore = isLowScore(careScoreRaw) || isLowScore(clinicScoreRaw);
 
     const descriptionLines = [
       `[B]Пациент[/B]: ${patient || "-"}`,
