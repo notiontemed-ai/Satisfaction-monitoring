@@ -332,9 +332,8 @@ function createTestBitrixTaskFromRow253() {
   const TARGET_ROW = 253;
   const WEBHOOK_BASE = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg";
   const TASK_ADD_URL = `${WEBHOOK_BASE}/tasks.task.add.json`;
-  const USER_SEARCH_URL = `${WEBHOOK_BASE}/user.search.json`;
   const DEPARTMENT_URL = `${WEBHOOK_BASE}/department.get.json`;
-  const OBSERVER_FIO = "Данилевич Екатерина Юрьевна";
+  const OBSERVER_ID = "2242";
 
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = spreadsheet.getSheetByName(SHEET_NAME);
@@ -477,29 +476,6 @@ function createTestBitrixTaskFromRow253() {
     };
   }
 
-  function findObserverIdByFio(fio) {
-    const response = UrlFetchApp.fetch(`${USER_SEARCH_URL}?FIND=${encodeURIComponent(fio)}`, {
-      muteHttpExceptions: true
-    });
-    const status = response.getResponseCode();
-    const raw = response.getContentText();
-    log("HTTP статус user.search", status);
-    log("Ответ user.search", raw);
-
-    if (status < 200 || status >= 300) {
-      throw new Error(`user.search вернул HTTP ${status}`);
-    }
-
-    const body = JSON.parse(raw);
-    const users = body.result || [];
-    const found = users.find(user => {
-      const fullName = `${toText(user.LAST_NAME)} ${toText(user.NAME)} ${toText(user.SECOND_NAME)}`.trim();
-      return fullName === fio;
-    });
-
-    return found ? toText(found.ID).trim() : null;
-  }
-
   function formatDate(value) {
     if (!value) return "-";
     if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value.getTime())) {
@@ -522,7 +498,7 @@ function createTestBitrixTaskFromRow253() {
   const requiredHeaders = [
     { name: "Отправлено в Битрикс", count: 1 },
     { name: "date", count: 1 },
-    { name: "Как вы оцениваете общее состояние своего здоровья?", count: 2 },
+    { name: "Как вы оценивает общее состояние своего здоровья?", count: 2 },
     { name: "Вы достигли цели лечения?", count: 2 },
     { name: "Как бы вы описали свое текущее состояние?", count: 2 },
     { name: "Как проходило обсуждение плана лечения?", count: 2 },
@@ -602,19 +578,7 @@ function createTestBitrixTaskFromRow253() {
   log("Подразделение, где найден UF_HEAD", `${hierarchy.resolvedDepartment.NAME} (ID=${hierarchy.resolvedDepartment.ID})`);
   log("Итоговый RESPONSIBLE_ID", hierarchy.responsibleId);
 
-  let observerId = null;
-  try {
-    observerId = findObserverIdByFio(OBSERVER_FIO);
-  } catch (error) {
-    log("Ошибка поиска наблюдателя", error && error.stack ? error.stack : String(error));
-    return;
-  }
-
-  log("Observer ID", observerId || "<не найден>");
-  if (!observerId) {
-    log("Ошибка", `Пользователь '${OBSERVER_FIO}' не найден по точному совпадению ФИО`);
-    return;
-  }
+  log("Observer ID", OBSERVER_ID);
 
   const deadline = addBusinessDays(startAt, 3);
   const deadlineIso = deadline.toISOString();
@@ -638,7 +602,7 @@ function createTestBitrixTaskFromRow253() {
   const month = toText(getCellByHeader(rowValues, headerIndexMap, "Месяц", 1)).trim() || "-";
 
   const questions = [
-    "Как вы оцениваете общее состояние своего здоровья?",
+    "Как вы оценивает общее состояние своего здоровья?",
     "Вы достигли цели лечения?",
     "Как бы вы описали свое текущее состояние?",
     "Как проходило обсуждение плана лечения?",
@@ -712,7 +676,7 @@ function createTestBitrixTaskFromRow253() {
       DESCRIPTION: descriptionLines.join("\n"),
       DESCRIPTION_IN_BBCODE: "Y",
       RESPONSIBLE_ID: hierarchy.responsibleId,
-      AUDITORS: [observerId],
+      AUDITORS: [OBSERVER_ID],
       DEADLINE: deadlineIso
     }
   };
