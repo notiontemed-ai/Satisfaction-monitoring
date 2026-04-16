@@ -75,14 +75,6 @@ function processSurveyResults() {
     return /(^|\s)(ошибка|error)\b/i.test(text);
   }
 
-  function hasErrorInMappedFields(rowValues, headerIndexMap, responseMap) {
-    return Object.keys(responseMap).some(responseKey => {
-      const header = responseMap[responseKey];
-      const value = getCellByHeader(rowValues, headerIndexMap, header, 1);
-      return isErrorValue(value);
-    });
-  }
-
   function normalizePhone(value) {
     if (Array.isArray(value)) {
       return value.map(item => toText(item).trim()).filter(Boolean).join(", ");
@@ -501,16 +493,14 @@ function processSurveyResults() {
   }
 
   for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
-    const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
     const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
     const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
     const processedAtText = toText(processedAtValue).trim();
     const bitrixText = toText(bitrixValue).trim();
     const hasProcessedAtError = isErrorValue(processedAtValue);
     const hasBitrixError = isErrorValue(bitrixValue);
-    const hasMappedFieldError = hasErrorInMappedFields(rowValues, headerIndexMap, responseToHeaderMap);
 
-    const rowHasError = hasProcessedAtError || hasBitrixError || hasMappedFieldError;
+    const rowHasError = hasProcessedAtError || hasBitrixError;
 
     if (processedAtText !== "" && hasProcessedAtError) {
       log(`Строка ${rowNumber}: найдена ошибка в 'Дата обработки', повторная обработка`);
@@ -518,10 +508,6 @@ function processSurveyResults() {
 
     if (bitrixText !== "" && hasBitrixError) {
       log(`Строка ${rowNumber}: найдена ошибка в 'bitrix', повторная обработка`);
-    }
-
-    if (hasMappedFieldError) {
-      log(`Строка ${rowNumber}: найдена ошибка в полях данных клиента, повторная обработка`);
     }
 
     if (!rowHasError && processedAtText !== "") {
@@ -601,12 +587,12 @@ function processSurveyResults() {
         sheet.getRange(rowNumber, targetColumn).setValue(value);
       });
 
-      const updatedRowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
-      const taskDecision = shouldCreateTask(updatedRowValues, headerIndexMap);
+      const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+      const taskDecision = shouldCreateTask(rowValues, headerIndexMap);
 
       if (taskDecision.hasLowScore || taskDecision.hasQuestion) {
         try {
-          const taskResult = createBitrixTaskForRow(updatedRowValues, headerIndexMap);
+          const taskResult = createBitrixTaskForRow(rowValues, headerIndexMap);
           sheet.getRange(rowNumber, bitrixColumn).setValue(taskResult);
           log(`Строка ${rowNumber}: задача создана`, taskResult);
         } catch (taskError) {
