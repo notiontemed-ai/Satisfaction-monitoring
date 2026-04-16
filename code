@@ -69,6 +69,12 @@ function processSurveyResults() {
     return typeof value === "string" ? value : String(value);
   }
 
+  function isErrorValue(value) {
+    const text = toText(value).trim();
+    if (!text) return false;
+    return /(^|\s)(ошибка|error)\b/i.test(text);
+  }
+
   function normalizePhone(value) {
     if (Array.isArray(value)) {
       return value.map(item => toText(item).trim()).filter(Boolean).join(", ");
@@ -489,14 +495,28 @@ function processSurveyResults() {
   for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
     const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
     const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
+    const processedAtText = toText(processedAtValue).trim();
+    const bitrixText = toText(bitrixValue).trim();
+    const hasProcessedAtError = isErrorValue(processedAtValue);
+    const hasBitrixError = isErrorValue(bitrixValue);
 
-    if (toText(processedAtValue).trim() !== "") {
-      log(`Остановка на строке ${rowNumber}: 'Дата обработки' уже заполнена`);
-      break;
+    const rowHasError = hasProcessedAtError || hasBitrixError;
+
+    if (processedAtText !== "" && hasProcessedAtError) {
+      log(`Строка ${rowNumber}: найдена ошибка в 'Дата обработки', повторная обработка`);
     }
 
-    if (toText(bitrixValue).trim() !== "") {
-      log(`Строка ${rowNumber}: колонка 'bitrix' уже заполнена, пропуск`);
+    if (bitrixText !== "" && hasBitrixError) {
+      log(`Строка ${rowNumber}: найдена ошибка в 'bitrix', повторная обработка`);
+    }
+
+    if (!rowHasError && processedAtText !== "") {
+      log(`Строка ${rowNumber}: 'Дата обработки' уже заполнена без ошибок, пропуск`);
+      continue;
+    }
+
+    if (!rowHasError && bitrixText !== "") {
+      log(`Строка ${rowNumber}: колонка 'bitrix' уже заполнена без ошибок, пропуск`);
       continue;
     }
 
