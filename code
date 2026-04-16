@@ -367,11 +367,13 @@ function createTestBitrixTaskFromRow253() {
   }
 
   function scoreEmoji(rawScore) {
-    const numeric = Number(toText(rawScore).replace(",", "."));
-    if (!Number.isFinite(numeric)) return "⚪";
-    if (numeric <= 2) return "🔴";
+    const normalized = toText(rawScore).trim().replace(",", ".");
+    const numeric = Number(normalized);
+    if (!normalized || !Number.isFinite(numeric)) return "⚪";
+    if (numeric === 1 || numeric === 2) return "🔴";
     if (numeric === 3) return "🟡";
-    return "🟢";
+    if (numeric === 4 || numeric === 5) return "🟢";
+    return "⚪";
   }
 
   function buildHeaderIndexMap(headers) {
@@ -392,25 +394,87 @@ function createTestBitrixTaskFromRow253() {
     return rowValues[index];
   }
 
-  function getDepartmentByClinic(clinicName) {
-    const response = UrlFetchApp.fetch(DEPARTMENT_URL, { muteHttpExceptions: true });
-    const status = response.getResponseCode();
-    const raw = response.getContentText();
-    log("HTTP статус department.get", status);
-    log("Ответ department.get", raw);
+  function ensureRequiredHeaders(headerIndexMap, required) {
+    const missing = required.filter(item => {
+      const count = (headerIndexMap[item.name] || []).length;
+      return count < item.count;
+    }).map(item => `${item.name} (нужно ${item.count}, найдено ${((headerIndexMap[item.name] || []).length)})`);
 
-    if (status < 200 || status >= 300) {
-      throw new Error(`department.get вернул HTTP ${status}`);
+    if (missing.length > 0) {
+      log("Ошибка обязательных колонок", missing.join("; "));
+      return false;
+    }
+    return true;
+  }
+
+  function fetchAllDepartments() {
+    const allDepartments = [];
+    let start = 0;
+
+    while (true) {
+      const url = `${DEPARTMENT_URL}?start=${start}`;
+      const response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      const status = response.getResponseCode();
+      const raw = response.getContentText();
+      log("HTTP статус department.get", `start=${start}; status=${status}`);
+      log("Ответ department.get", raw);
+
+      if (status < 200 || status >= 300) {
+        throw new Error(`department.get вернул HTTP ${status} (start=${start})`);
+      }
+
+      const body = JSON.parse(raw);
+      const page = body.result || [];
+      allDepartments.push(...page);
+
+      if (body.next === undefined || body.next === null) {
+        break;
+      }
+
+      start = Number(body.next);
+      if (!Number.isFinite(start)) {
+        break;
+      }
     }
 
-    const body = JSON.parse(raw);
-    const departments = body.result || [];
-    const exact = departments.find(dep => toText(dep.NAME).trim() === clinicName);
-    if (exact) return exact;
+    return allDepartments;
+  }
 
-    const normalized = normalizeClinicName(clinicName);
-    log("Нормализованная клиника", normalized);
-    return departments.find(dep => toText(dep.NAME).trim() === normalized) || null;
+  function toSingleId(rawValue) {
+    if (Array.isArray(rawValue)) return toText(rawValue[0]).trim();
+    return toText(rawValue).trim();
+  }
+
+  function resolveResponsibleByHierarchy(startDepartment, departmentById) {
+    const chain = [];
+    let current = startDepartment;
+    let guard = 0;
+
+    while (current && guard < 200) {
+      guard += 1;
+      const headId = toSingleId(current.UF_HEAD);
+      chain.push(`${current.NAME} [ID=${current.ID}, PARENT=${toText(current.PARENT).trim() || "-"}, UF_HEAD=${headId || "-"}]`);
+
+      if (headId) {
+        return {
+          responsibleId: headId,
+          resolvedDepartment: current,
+          chain
+        };
+      }
+
+      const parentId = toText(current.PARENT).trim();
+      if (!parentId || parentId === "0") {
+        break;
+      }
+      current = departmentById[parentId] || null;
+    }
+
+    return {
+      responsibleId: "",
+      resolvedDepartment: current || startDepartment,
+      chain
+    };
   }
 
   function findObserverIdByFio(fio) {
@@ -432,15 +496,16 @@ function createTestBitrixTaskFromRow253() {
       const fullName = `${toText(user.LAST_NAME)} ${toText(user.NAME)} ${toText(user.SECOND_NAME)}`.trim();
       return fullName === fio;
     });
+
     return found ? toText(found.ID).trim() : null;
   }
 
   function formatDate(value) {
-    if (!value) return "";
+    if (!value) return "-";
     if (Object.prototype.toString.call(value) === "[object Date]" && !isNaN(value.getTime())) {
       return Utilities.formatDate(value, Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm");
     }
-    return toText(value);
+    return toText(value).trim() || "-";
   }
 
   if (!sheet) {
@@ -449,35 +514,103 @@ function createTestBitrixTaskFromRow253() {
   }
 
   const startAt = new Date();
-  log("Запуск функции", `row=${TARGET_ROW}`);
+  log("Старт функции", `row=${TARGET_ROW}`);
 
   const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
   const headerIndexMap = buildHeaderIndexMap(headers);
+
+  const requiredHeaders = [
+    { name: "Отправлено в Битрикс", count: 1 },
+    { name: "date", count: 1 },
+    { name: "Как вы оцениваете общее состояние своего здоровья?", count: 2 },
+    { name: "Вы достигли цели лечения?", count: 2 },
+    { name: "Как бы вы описали свое текущее состояние?", count: 2 },
+    { name: "Как проходило обсуждение плана лечения?", count: 2 },
+    { name: "Лечение прошло так, как вы ожидали?", count: 2 },
+    { name: "Вам хватило общения со своим лечащим врачом?", count: 2 },
+    { name: "Чувствовали ли вы, что о вас заботятся на протяжении лечения?", count: 2 },
+    { name: "Как бы вы оценили лечение в нашей клинике?", count: 1 },
+    { name: "Если у вас остались вопросы, вы можете задать их главному врачу", count: 1 },
+    { name: "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение", count: 1 },
+    { name: "Как бы вам удобнее получить ответ?", count: 1 },
+    { name: "id", count: 1 },
+    { name: "doc", count: 1 },
+    { name: "Основной сотрудник", count: 1 },
+    { name: "Месяц", count: 1 },
+    { name: "Клиника", count: 1 },
+    { name: "Пациент", count: 1 },
+    { name: "Комментарий для врача", count: 1 },
+    { name: "Комментарий для администратора", count: 1 },
+    { name: "Телефон", count: 1 },
+    { name: "Статус Клиента", count: 1 },
+    { name: "Дата установки статуса", count: 1 },
+    { name: "Email", count: 1 },
+    { name: "Дата последнего визита", count: 1 }
+  ];
+
+  if (!ensureRequiredHeaders(headerIndexMap, requiredHeaders)) {
+    return;
+  }
+
   const rowValues = sheet.getRange(TARGET_ROW, 1, 1, sheet.getLastColumn()).getValues()[0];
+  log("Обрабатываемая строка", TARGET_ROW);
 
   const clinic = toText(getCellByHeader(rowValues, headerIndexMap, "Клиника", 1)).trim();
-  log("Найденная клиника", clinic);
+  const normalizedClinic = normalizeClinicName(clinic);
+  log("Исходная клиника", clinic || "<пусто>");
+  log("Нормализованная клиника", normalizedClinic || "<пусто>");
+
   if (!clinic) {
     log("Ошибка", "В строке 253 пустое поле 'Клиника'");
     return;
   }
 
-  const department = getDepartmentByClinic(clinic);
-  if (!department) {
-    log("Ошибка", `Подразделение для клиники '${clinic}' не найдено`);
+  let departments;
+  try {
+    departments = fetchAllDepartments();
+  } catch (error) {
+    log("Ошибка загрузки подразделений", error && error.stack ? error.stack : String(error));
     return;
   }
 
-  const responsibleIdRaw = department.UF_HEAD;
-  const responsibleId = Array.isArray(responsibleIdRaw) ? toText(responsibleIdRaw[0]).trim() : toText(responsibleIdRaw).trim();
-  log("Найденный RESPONSIBLE_ID", responsibleId);
-  if (!responsibleId) {
-    log("Ошибка", `UF_HEAD пустой для подразделения '${department.NAME}'`);
+  log("Число загруженных подразделений", departments.length);
+
+  const byId = {};
+  departments.forEach(dep => {
+    byId[toText(dep.ID).trim()] = dep;
+  });
+
+  const exactDepartment = departments.find(dep => toText(dep.NAME).trim() === clinic);
+  const normalizedDepartment = departments.find(dep => toText(dep.NAME).trim() === normalizedClinic);
+  const foundDepartment = exactDepartment || normalizedDepartment || null;
+
+  if (!foundDepartment) {
+    log("Ошибка", `Подразделение не найдено для клиники '${clinic}' (после нормализации: '${normalizedClinic}')`);
     return;
   }
 
-  const observerId = findObserverIdByFio(OBSERVER_FIO);
-  log("Найденный observer ID", observerId || "<не найден>");
+  log("Найденное подразделение", `${foundDepartment.NAME} (ID=${foundDepartment.ID}, PARENT=${toText(foundDepartment.PARENT).trim() || "-"}, UF_HEAD=${toSingleId(foundDepartment.UF_HEAD) || "-"})`);
+
+  const hierarchy = resolveResponsibleByHierarchy(foundDepartment, byId);
+  log("Цепочка fallback по PARENT", hierarchy.chain.join(" -> "));
+
+  if (!hierarchy.responsibleId) {
+    log("Ошибка", `Не найден UF_HEAD по всей цепочке вверх. Корневое подразделение: '${hierarchy.resolvedDepartment ? hierarchy.resolvedDepartment.NAME : foundDepartment.NAME}'`);
+    return;
+  }
+
+  log("Подразделение, где найден UF_HEAD", `${hierarchy.resolvedDepartment.NAME} (ID=${hierarchy.resolvedDepartment.ID})`);
+  log("Итоговый RESPONSIBLE_ID", hierarchy.responsibleId);
+
+  let observerId = null;
+  try {
+    observerId = findObserverIdByFio(OBSERVER_FIO);
+  } catch (error) {
+    log("Ошибка поиска наблюдателя", error && error.stack ? error.stack : String(error));
+    return;
+  }
+
+  log("Observer ID", observerId || "<не найден>");
   if (!observerId) {
     log("Ошибка", `Пользователь '${OBSERVER_FIO}' не найден по точному совпадению ФИО`);
     return;
@@ -493,74 +626,84 @@ function createTestBitrixTaskFromRow253() {
   const phone = toText(getCellByHeader(rowValues, headerIndexMap, "Телефон", 1)).trim();
   const email = toText(getCellByHeader(rowValues, headerIndexMap, "Email", 1)).trim();
   const surveyDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "date", 1));
-  const clientStatus = toText(getCellByHeader(rowValues, headerIndexMap, "Статус Клиента", 1)).trim();
+  const clientStatus = toText(getCellByHeader(rowValues, headerIndexMap, "Статус Клиента", 1)).trim() || "-";
   const statusDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата установки статуса", 1));
   const lastVisitDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата последнего визита", 1));
-  const chiefDoctorQuestion = toText(getCellByHeader(rowValues, headerIndexMap, "Вопрос главному врачу", 1)).trim();
-  const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Предпочтительный способ ответа", 1)).trim();
-  const doctorComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для врача", 1)).trim();
-  const adminComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для администратора", 1)).trim();
-  const doc = toText(getCellByHeader(rowValues, headerIndexMap, "doc", 1)).trim();
-  const month = toText(getCellByHeader(rowValues, headerIndexMap, "Месяц", 1)).trim();
+  const questionPrompt = toText(getCellByHeader(rowValues, headerIndexMap, "Если у вас остались вопросы, вы можете задать их главному врачу", 1)).trim() || "-";
+  const chiefDoctorQuestion = toText(getCellByHeader(rowValues, headerIndexMap, "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение", 1)).trim() || "-";
+  const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Как бы вам удобнее получить ответ?", 1)).trim() || "-";
+  const doctorComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для врача", 1)).trim() || "-";
+  const adminComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для администратора", 1)).trim() || "-";
+  const doc = toText(getCellByHeader(rowValues, headerIndexMap, "doc", 1)).trim() || "-";
+  const month = toText(getCellByHeader(rowValues, headerIndexMap, "Месяц", 1)).trim() || "-";
 
-  const qa = [
+  const questions = [
     "Как вы оцениваете общее состояние своего здоровья?",
     "Вы достигли цели лечения?",
     "Как бы вы описали свое текущее состояние?",
     "Как проходило обсуждение плана лечения?",
     "Лечение прошло так, как вы ожидали?",
     "Вам хватило общения со своим лечащим врачом?",
-    "Чувствовали ли вы, что о вас заботятся на протяжении лечения?",
-    "Как бы вы оценили лечение в нашей клинике?"
-  ].map((questionText, index) => {
-    const answer = toText(getCellByHeader(rowValues, headerIndexMap, questionText, 1)).trim();
-    const score = toText(getCellByHeader(rowValues, headerIndexMap, "Оценка", index + 1)).trim();
+    "Чувствовали ли вы, что о вас заботятся на протяжении лечения?"
+  ];
+
+  const qa = questions.map(questionText => {
+    const answer = toText(getCellByHeader(rowValues, headerIndexMap, questionText, 1)).trim() || "-";
+    const score = toText(getCellByHeader(rowValues, headerIndexMap, questionText, 2)).trim();
     return {
       questionText,
       answer,
-      score,
+      score: score || "-",
       emoji: scoreEmoji(score)
     };
   });
 
+  const clinicScoreRaw = toText(getCellByHeader(rowValues, headerIndexMap, "Как бы вы оценили лечение в нашей клинике?", 1)).trim();
+  qa.push({
+    questionText: "Как бы вы оценили лечение в нашей клинике?",
+    answer: "-",
+    score: clinicScoreRaw || "-",
+    emoji: scoreEmoji(clinicScoreRaw)
+  });
+
   const descriptionLines = [
-    `[B]Пациент:[/B] ${patient}`,
-    `[B]ID клиента:[/B] ${clientId}`,
-    `[B]Клиника:[/B] ${clinic}`,
-    `[B]Лечащий врач:[/B] ${doctor}`,
-    `[B]Телефон:[/B] ${phone}`,
-    `[B]Email:[/B] ${email}`,
-    `[B]Дата опроса:[/B] ${surveyDate}`,
-    `[B]Статус клиента:[/B] ${clientStatus}`,
-    `[B]Дата установки статуса:[/B] ${statusDate}`,
-    `[B]Дата последнего визита:[/B] ${lastVisitDate}`,
+    `[B]Пациент[/B]: ${patient || "-"}`,
+    `[B]ID клиента[/B]: ${clientId || "-"}`,
+    `[B]Клиника[/B]: ${clinic || "-"}`,
+    `[B]Лечащий врач[/B]: ${doctor || "-"}`,
+    `[B]Телефон[/B]: ${phone || "-"}`,
+    `[B]Email[/B]: ${email || "-"}`,
+    `[B]Дата опроса[/B]: ${surveyDate}`,
+    `[B]Статус клиента[/B]: ${clientStatus}`,
+    `[B]Дата установки статуса[/B]: ${statusDate}`,
+    `[B]Дата последнего визита[/B]: ${lastVisitDate}`,
     "",
     "[B]Ответы пациента[/B]"
   ];
 
   qa.forEach(item => {
+    descriptionLines.push(item.questionText);
+    if (item.answer && item.answer !== "-") descriptionLines.push(item.answer);
+    descriptionLines.push(`Оценка: ${item.emoji} ${item.score}`);
     descriptionLines.push("");
-    descriptionLines.push(`[B]${item.questionText}[/B]`);
-    descriptionLines.push(item.answer || "-");
-    descriptionLines.push(`Оценка: ${item.emoji} ${item.score || "-"}`);
   });
 
   descriptionLines.push(
-    "",
     "[B]Вопрос главному врачу[/B]",
-    `[B]Текст вопроса:[/B] ${chiefDoctorQuestion || "-"}`,
-    `[B]Предпочтительный способ ответа:[/B] ${preferredResponse || "-"}`,
+    questionPrompt,
+    chiefDoctorQuestion,
+    preferredResponse,
     "",
     "[B]Комментарии[/B]",
-    `[B]Комментарий для врача:[/B] ${doctorComment || "-"}`,
-    `[B]Комментарий для администратора:[/B] ${adminComment || "-"}`,
+    `[B]Комментарий для врача[/B]: ${doctorComment}`,
+    `[B]Комментарий для администратора[/B]: ${adminComment}`,
     "",
-    "[B]Служебные данные[/B]",
-    `[B]doc:[/B] ${doc || "-"}`,
-    `[B]Месяц:[/B] ${month || "-"}`
+    "[B]Служебный блок[/B]",
+    `[B]doc[/B]: ${doc}`,
+    `[B]Месяц[/B]: ${month}`
   );
 
-  const titleDate = surveyDate || Utilities.formatDate(startAt, Session.getScriptTimeZone(), "dd.MM.yyyy");
+  const titleDate = surveyDate === "-" ? Utilities.formatDate(startAt, Session.getScriptTimeZone(), "dd.MM.yyyy") : surveyDate;
   const title = `Опрос пациента: ${patient || "Без имени"} / ${clinic || "Без клиники"} / ${titleDate}`;
 
   const payload = {
@@ -568,7 +711,7 @@ function createTestBitrixTaskFromRow253() {
       TITLE: title,
       DESCRIPTION: descriptionLines.join("\n"),
       DESCRIPTION_IN_BBCODE: "Y",
-      RESPONSIBLE_ID: responsibleId,
+      RESPONSIBLE_ID: hierarchy.responsibleId,
       AUDITORS: [observerId],
       DEADLINE: deadlineIso
     }
@@ -587,22 +730,21 @@ function createTestBitrixTaskFromRow253() {
     const status = response.getResponseCode();
     const raw = response.getContentText();
     log("HTTP статус tasks.task.add", status);
-    log("Ответ tasks.task.add", raw);
+    log("Сырой ответ Bitrix", raw);
 
     const body = JSON.parse(raw);
     const taskId = toText(body?.result?.task?.id || body?.result?.id || body?.result).trim();
+
     if (status >= 200 && status < 300 && taskId) {
       log("ID созданной задачи", taskId);
       const sentColumnIndex = (headerIndexMap["Отправлено в Битрикс"] || [])[0];
-      if (sentColumnIndex !== undefined) {
-        const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
-        sheet.getRange(TARGET_ROW, sentColumnIndex + 1).setValue(`TASK ${taskId} ${stamp}`);
-      }
+      const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
+      sheet.getRange(TARGET_ROW, sentColumnIndex + 1).setValue(`TASK ${taskId} ${stamp}`);
     } else {
       log("Ошибка при создании задачи", raw);
     }
   } catch (error) {
-    log("Исключение", error && error.stack ? error.stack : String(error));
+    log("Текст ошибки при сбое", error && error.stack ? error.stack : String(error));
   }
 }
 
