@@ -375,6 +375,12 @@ function createTestBitrixTaskFromRow253() {
     return "⚪";
   }
 
+  function isLowScore(rawScore) {
+    const normalized = toText(rawScore).trim().replace(",", ".");
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) && (numeric === 1 || numeric === 2);
+  }
+
   function buildHeaderIndexMap(headers) {
     const map = {};
     headers.forEach((header, idx) => {
@@ -593,8 +599,9 @@ function createTestBitrixTaskFromRow253() {
   const clientStatus = toText(getCellByHeader(rowValues, headerIndexMap, "Статус Клиента", 1)).trim() || "-";
   const statusDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата установки статуса", 1));
   const lastVisitDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата последнего визита", 1));
-  const questionPrompt = toText(getCellByHeader(rowValues, headerIndexMap, "Если у вас остались вопросы, вы можете задать их главному врачу", 1)).trim() || "-";
-  const chiefDoctorQuestion = toText(getCellByHeader(rowValues, headerIndexMap, "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение", 1)).trim() || "-";
+  const chiefDoctorQuestionRaw = toText(getCellByHeader(rowValues, headerIndexMap, "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение", 1)).trim();
+  const chiefDoctorQuestion = chiefDoctorQuestionRaw || "Вопрос не указан";
+  const hasQuestion = chiefDoctorQuestionRaw !== "";
   const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Как бы вам удобнее получить ответ?", 1)).trim() || "-";
   const doctorComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для врача", 1)).trim() || "-";
   const adminComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для администратора", 1)).trim() || "-";
@@ -630,6 +637,8 @@ function createTestBitrixTaskFromRow253() {
     emoji: scoreEmoji(clinicScoreRaw)
   });
 
+  const hasLowScore = qa.some(item => isLowScore(item.score));
+
   const descriptionLines = [
     `[B]Пациент[/B]: ${patient || "-"}`,
     `[B]ID клиента[/B]: ${clientId || "-"}`,
@@ -653,10 +662,10 @@ function createTestBitrixTaskFromRow253() {
   });
 
   descriptionLines.push(
-    "[B]Вопрос главному врачу[/B]",
-    questionPrompt,
+    "[B]Вопрос пациента[/B]",
     chiefDoctorQuestion,
-    preferredResponse,
+    "",
+    `[B]Предпочтительный способ ответа[/B]: ${preferredResponse}`,
     "",
     "[B]Комментарии[/B]",
     `[B]Комментарий для врача[/B]:`,
@@ -669,8 +678,14 @@ function createTestBitrixTaskFromRow253() {
     `[B]Месяц[/B]: ${month}`
   );
 
-  const titleDate = surveyDate === "-" ? Utilities.formatDate(startAt, Session.getScriptTimeZone(), "dd.MM.yyyy") : surveyDate;
-  const title = `Опрос пациента: ${patient || "Без имени"} / ${clinic || "Без клиники"} / ${titleDate}`;
+  let titleSuffix = "";
+  if (hasLowScore) {
+    titleSuffix = "Низкая оценка";
+  } else if (hasQuestion) {
+    titleSuffix = "Вопрос";
+  }
+  const titleBase = patient || "Без имени";
+  const title = titleSuffix ? `${titleBase} ${titleSuffix}` : titleBase;
 
   const payload = {
     fields: {
