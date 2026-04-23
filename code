@@ -7,7 +7,7 @@ function processSurveyResults() {
   const WEBHOOK_URL = "https://n8n-x3.tech.temed.ru/webhook/fcc0619b-b9db-4201-b6f1-6ea2bd59be45";
   const LOG_SHEET_NAME = "Лог n8n";
 
-  const WEBHOOK_BASE = "https://kte.bitrix24.ru/rest/72118/1yg2v6i6w113bxpg";
+  const WEBHOOK_BASE = "https://kte.bitrix24.ru/rest/72118/2l8bniiqhrtxcxl4";
   const TASK_ADD_URL = `${WEBHOOK_BASE}/tasks.task.add.json`;
   const DEPARTMENT_URL = `${WEBHOOK_BASE}/department.get.json`;
   const OBSERVER_ID = "2242";
