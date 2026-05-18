@@ -11,6 +11,11 @@ function processSurveyResults() {
   const TASK_ADD_URL = `${WEBHOOK_BASE}/tasks.task.add.json`;
   const DEPARTMENT_URL = `${WEBHOOK_BASE}/department.get.json`;
   const OBSERVER_ID = "2242";
+  const BITRIX_SATISFACTION_GROUP_ID = 144;
+  const TAG_LOW_SATISFACTION = "Низкая оценка удовлетворенности";
+  const TAG_PATIENT_QUESTION = "Вопрос пациента";
+
+  const TASK_COMMENT_ADD_URL = `${WEBHOOK_BASE}/task.commentitem.add.json`;
 
   const requiredHeaders = [
     "id",
@@ -239,6 +244,50 @@ function processSurveyResults() {
     return toText(value).trim() || "-";
   }
 
+  function hasMeaningfulPatientQuestion(questionText) {
+    return toText(questionText).trim() !== "";
+  }
+
+  function buildSatisfactionTaskIntroMessage(params) {
+    const reasons = [];
+
+    if (params.hasLowClinicScore) {
+      reasons.push("— низкая общая оценка взаимодействия");
+    }
+    if (params.hasLowCareScore) {
+      reasons.push("— низкая оценка по шкале «Забота»");
+    }
+    if (params.hasQuestion) {
+      reasons.push("— вопрос пациента");
+    }
+
+    const lines = [
+      "Коллеги, по итогам опроса удовлетворённости создана задача, требующая внимания.",
+      "",
+      "Причина:",
+      ...reasons
+    ];
+
+    if (params.hasQuestion) {
+      lines.push("", "Вопрос пациента:", params.patientQuestion);
+
+      if (toText(params.preferredResponse).trim() !== "") {
+        lines.push("", "Предпочтительный способ ответа:", params.preferredResponse);
+      }
+    }
+
+    lines.push(
+      "",
+      "Наша задача здесь — не просто формально отработать обращение, а спокойно понять, что именно произошло, почему пациент дал такую оценку, и что мы можем улучшить в своей работе.",
+      "",
+      "Если потребуется связаться с пациентом для уточнения деталей, прошу делать это очень бережно и деликатно. Для пациента это должно быть проявлением внимания и заботы, а не ощущаться как допрос.",
+      "",
+      "Ответ и все комментарии прошу публиковать в чате задачи."
+    );
+
+    return lines.join("\n");
+  }
+
   function shouldCreateTask(rowValues, headerIndexMap) {
     const careScore = getCellByHeader(
       rowValues,
@@ -254,22 +303,31 @@ function processSurveyResults() {
       1
     );
 
-    const chiefDoctorQuestionRaw = toText(
-      getCellByHeader(
-        rowValues,
-        headerIndexMap,
-        "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение",
-        1
-      )
-    ).trim();
+    const rawQuestion = getCellByHeader(
+      rowValues,
+      headerIndexMap,
+      "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение",
+      1
+    );
+
+    const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Как бы вам удобнее получить ответ?", 1)).trim();
+    const hasLowCareScore = isLowScore(careScore);
+    const hasLowClinicScore = isLowScore(clinicScore);
+    const hasLowScore = hasLowCareScore || hasLowClinicScore;
+    const patientQuestion = toText(rawQuestion).trim();
+    const hasQuestion = hasMeaningfulPatientQuestion(rawQuestion);
 
     return {
-      hasLowScore: isLowScore(careScore) || isLowScore(clinicScore),
-      hasQuestion: chiefDoctorQuestionRaw !== ""
+      hasLowScore,
+      hasLowCareScore,
+      hasLowClinicScore,
+      hasQuestion,
+      patientQuestion,
+      preferredResponse
     };
   }
 
-  function createBitrixTaskForRow(rowValues, headerIndexMap) {
+  function createBitrixTaskForRow(rowValues, headerIndexMap, taskDecision) {
     const startAt = new Date();
 
     const clinic = toText(getCellByHeader(rowValues, headerIndexMap, "Клиника", 1)).trim();
@@ -312,17 +370,9 @@ function processSurveyResults() {
     const clientStatus = toText(getCellByHeader(rowValues, headerIndexMap, "Статус Клиента", 1)).trim() || "-";
     const statusDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата установки статуса", 1));
     const lastVisitDate = formatDate(getCellByHeader(rowValues, headerIndexMap, "Дата последнего визита", 1));
-    const chiefDoctorQuestionRaw = toText(
-      getCellByHeader(
-        rowValues,
-        headerIndexMap,
-        "Напишите, пожалуйста, ваш вопрос и мы обязательно передадим его главному врачу клиники, в которой вы проходили лечение",
-        1
-      )
-    ).trim();
-    const chiefDoctorQuestion = chiefDoctorQuestionRaw || "Вопрос не указан";
-    const hasQuestion = chiefDoctorQuestionRaw !== "";
-    const preferredResponse = toText(getCellByHeader(rowValues, headerIndexMap, "Как бы вам удобнее получить ответ?", 1)).trim() || "-";
+    const chiefDoctorQuestion = taskDecision.patientQuestion;
+    const hasQuestion = taskDecision.hasQuestion;
+    const preferredResponse = taskDecision.preferredResponse || "-";
     const doctorComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для врача", 1)).trim() || "-";
     const adminComment = toText(getCellByHeader(rowValues, headerIndexMap, "Комментарий для администратора", 1)).trim() || "-";
     const doc = toText(getCellByHeader(rowValues, headerIndexMap, "doc", 1)).trim() || "-";
@@ -365,7 +415,7 @@ function processSurveyResults() {
         2
       )
     ).trim();
-    const hasLowScore = isLowScore(careScoreRaw) || isLowScore(clinicScoreRaw);
+    const hasLowScore = taskDecision.hasLowScore;
 
     const descriptionLines = [
       `[B]Пациент[/B]: ${patient || "-"}`,
@@ -389,12 +439,17 @@ function processSurveyResults() {
       descriptionLines.push("");
     });
 
+    if (hasQuestion) {
+      descriptionLines.push(
+        "[B]Вопрос пациента[/B]",
+        chiefDoctorQuestion,
+        "",
+        `[B]Предпочтительный способ ответа[/B]: ${preferredResponse}`,
+        ""
+      );
+    }
+
     descriptionLines.push(
-      "[B]Вопрос пациента[/B]",
-      chiefDoctorQuestion,
-      "",
-      `[B]Предпочтительный способ ответа[/B]: ${preferredResponse}`,
-      "",
       "[B]Комментарии[/B]",
       `[B]Комментарий для врача[/B]:`,
       `${doctorComment}`,
@@ -422,7 +477,12 @@ function processSurveyResults() {
         DESCRIPTION_IN_BBCODE: "Y",
         RESPONSIBLE_ID: hierarchy.responsibleId,
         AUDITORS: [OBSERVER_ID],
-        DEADLINE: deadlineIso
+        DEADLINE: deadlineIso,
+        GROUP_ID: BITRIX_SATISFACTION_GROUP_ID,
+        TAGS: [
+          ...(hasLowScore ? [TAG_LOW_SATISFACTION] : []),
+          ...(hasQuestion ? [TAG_PATIENT_QUESTION] : [])
+        ]
       }
     };
 
@@ -457,6 +517,35 @@ function processSurveyResults() {
 
     if (!(status >= 200 && status < 300) || !taskId) {
       throw new Error(`Ошибка при создании задачи: ${raw}`);
+    }
+
+
+    const introMessage = buildSatisfactionTaskIntroMessage({
+      hasLowClinicScore: taskDecision.hasLowClinicScore,
+      hasLowCareScore: taskDecision.hasLowCareScore,
+      hasQuestion,
+      patientQuestion: chiefDoctorQuestion,
+      preferredResponse: taskDecision.preferredResponse
+    });
+
+    try {
+      const commentResponse = UrlFetchApp.fetch(TASK_COMMENT_ADD_URL, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          TASKID: taskId,
+          POST_MESSAGE: introMessage
+        }),
+        muteHttpExceptions: true
+      });
+      const commentStatus = commentResponse.getResponseCode();
+      const commentRaw = commentResponse.getContentText();
+
+      if (!(commentStatus >= 200 && commentStatus < 300)) {
+        log("Ошибка публикации вводного сообщения", `taskId=${taskId}; status=${commentStatus}; body=${commentRaw}`);
+      }
+    } catch (commentError) {
+      log("Ошибка публикации вводного сообщения", `taskId=${taskId}; error=${commentError}`);
     }
 
     const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
@@ -619,7 +708,7 @@ function processSurveyResults() {
 
       if (taskDecision.hasLowScore || taskDecision.hasQuestion) {
         try {
-          const taskResult = createBitrixTaskForRow(updatedRowValues, headerIndexMap);
+          const taskResult = createBitrixTaskForRow(updatedRowValues, headerIndexMap, taskDecision);
           sheet.getRange(rowNumber, bitrixColumn).setValue(taskResult);
           log(`Строка ${rowNumber}: задача создана`, taskResult);
         } catch (taskError) {
