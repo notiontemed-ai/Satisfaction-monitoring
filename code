@@ -759,11 +759,16 @@ function processSurveyResultsInternal_(options) {
 
   if (mode === "errors") {
     log("Режим обработки", "Все строки с ошибками");
+    const dataRowCount = lastDataRow - 1;
+    const allRowValues = sheet.getRange(2, 1, dataRowCount, lastColumn).getValues();
+    const processedAtValues = sheet.getRange(2, processedAtColumn, dataRowCount, 1).getValues();
+    const bitrixValues = sheet.getRange(2, bitrixColumn, dataRowCount, 1).getValues();
 
     for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
-      const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
-      const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
-      const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
+      const rowIndex = rowNumber - 2;
+      const rowValues = allRowValues[rowIndex];
+      const processedAtValue = processedAtValues[rowIndex][0];
+      const bitrixValue = bitrixValues[rowIndex][0];
       const errorState = getRowErrorState(rowValues, processedAtValue, bitrixValue, headerIndexMap);
 
       if (errorState.rowHasError) {
@@ -771,7 +776,7 @@ function processSurveyResultsInternal_(options) {
       }
     }
 
-    log("Найдено строк с ошибками для ручной обработки", rowsToProcess.length);
+    log("Найдено строк с ошибками для обработки в режиме 'Все строки с ошибками'", rowsToProcess.length);
 
     if (rowsToProcess.length === 0) {
       log("Строки с ошибками не найдены");
