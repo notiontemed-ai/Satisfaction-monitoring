@@ -1,4 +1,18 @@
 function processSurveyResults() {
+  processSurveyResultsInternal_({
+    mode: "recent"
+  });
+}
+
+function processSurveyResultErrorRows() {
+  processSurveyResultsInternal_({
+    mode: "errors"
+  });
+}
+
+function processSurveyResultsInternal_(options) {
+  const mode = options && options.mode ? options.mode : "recent";
+
   const SHEET_NAME = "Опрос результат";
   const MAX_ROWS_TO_CHECK = 15;
   const SOURCE_DATE_HEADER = "date";
@@ -8,6 +22,9 @@ function processSurveyResults() {
   const LOG_SHEET_NAME = "Лог n8n";
 
   const WEBHOOK_BASE = "https://kte.bitrix24.ru/rest/72118/2l8bniiqhrtxcxl4";
+  const ERROR_NOTIFY_USER_ID = "72118";
+  const BITRIX_NOTIFY_PERSONAL_URL = `${WEBHOOK_BASE}/im.notify.personal.add.json`;
+  const BITRIX_IM_MESSAGE_ADD_URL = `${WEBHOOK_BASE}/im.message.add.json`;
   const TASK_ADD_URL = `${WEBHOOK_BASE}/tasks.task.add.json`;
   const DEPARTMENT_URL = `${WEBHOOK_BASE}/department.get.json`;
   const OBSERVER_ID = "2242";
@@ -68,6 +85,111 @@ function processSurveyResults() {
     const detailsText = details === undefined ? "" : String(details);
     Logger.log(`${message}${detailsText ? ` | ${detailsText}` : ""}`);
     logSheet.appendRow([new Date(), message, detailsText]);
+  }
+
+  function truncateText(value, maxLength) {
+    const text = toText(value);
+    if (text.length <= maxLength) return text;
+    return `${text.slice(0, maxLength - 3)}...`;
+  }
+
+  function buildErrorNotificationMessage(title, details) {
+    const spreadsheetUrl = spreadsheet.getUrl();
+
+    return [
+      "[B]Ошибка обработки опроса удовлетворённости[/B]",
+      "",
+      `[B]Ошибка[/B]: ${title}`,
+      details ? `[B]Детали[/B]: ${details}` : "",
+      "",
+      `[B]Таблица[/B]: ${spreadsheet.getName()}`,
+      `[B]Лист[/B]: ${SHEET_NAME}`,
+      `[B]Ссылка[/B]: ${spreadsheetUrl}`,
+      `[B]Время[/B]: ${Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss")}`
+    ].filter(Boolean).join("\n");
+  }
+
+  function isSuccessfulBitrixResponse(response) {
+    const status = response.getResponseCode();
+    const raw = response.getContentText();
+
+    if (!(status >= 200 && status < 300)) {
+      return {
+        ok: false,
+        details: `HTTP ${status}; body=${raw}`
+      };
+    }
+
+    try {
+      const body = JSON.parse(raw);
+      if (body && body.error) {
+        return {
+          ok: false,
+          details: `Bitrix error=${body.error}; description=${body.error_description || ""}; body=${raw}`
+        };
+      }
+    } catch (e) {
+      // Если Bitrix вернул не JSON, но HTTP 2xx, считаем отправку условно успешной.
+    }
+
+    return {
+      ok: true,
+      details: raw
+    };
+  }
+
+  function notifyBitrixError(title, details) {
+    const message = truncateText(buildErrorNotificationMessage(title, details), 3500);
+    const tag = `survey_processing_error_${new Date().getTime()}`;
+
+    try {
+      const notifyResponse = UrlFetchApp.fetch(BITRIX_NOTIFY_PERSONAL_URL, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          USER_ID: Number(ERROR_NOTIFY_USER_ID),
+          MESSAGE: message,
+          MESSAGE_OUT: message,
+          TAG: tag,
+          SUB_TAG: "survey_processing_error"
+        }),
+        muteHttpExceptions: true
+      });
+
+      const notifyResult = isSuccessfulBitrixResponse(notifyResponse);
+
+      if (notifyResult.ok) {
+        log("Уведомление об ошибке отправлено через im.notify.personal.add", `USER_ID=${ERROR_NOTIFY_USER_ID}`);
+        return;
+      }
+
+      log("Не удалось отправить уведомление через im.notify.personal.add", notifyResult.details);
+    } catch (notifyError) {
+      log("Ошибка вызова im.notify.personal.add", notifyError);
+    }
+
+    try {
+      const messageResponse = UrlFetchApp.fetch(BITRIX_IM_MESSAGE_ADD_URL, {
+        method: "post",
+        contentType: "application/json",
+        payload: JSON.stringify({
+          DIALOG_ID: ERROR_NOTIFY_USER_ID,
+          MESSAGE: message
+        }),
+        muteHttpExceptions: true
+      });
+
+      const messageResult = isSuccessfulBitrixResponse(messageResponse);
+
+      if (messageResult.ok) {
+        log("Уведомление об ошибке отправлено через im.message.add", `DIALOG_ID=${ERROR_NOTIFY_USER_ID}`);
+        return;
+      }
+
+      log("Не удалось отправить уведомление через im.message.add", messageResult.details);
+    } catch (messageError) {
+      log("Ошибка вызова im.message.add", messageError);
+    }
   }
 
   function toText(value) {
@@ -160,10 +282,27 @@ function processSurveyResults() {
   function ensureRequiredHeaders(headerIndexMap, required) {
     const missing = required.filter(header => !headerIndexMap[header] || headerIndexMap[header].length < 1);
     if (missing.length > 0) {
-      log("Не найдены обязательные колонки", missing.join(", "));
+      const details = missing.join(", ");
+      log("Не найдены обязательные колонки", details);
+      notifyBitrixError("Не найдены обязательные колонки", details);
       return false;
     }
     return true;
+  }
+
+  function writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, details) {
+    sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
+    sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
+
+    log(`Строка ${rowNumber}: ${errorText}`, details || "");
+    notifyBitrixError(`Строка ${rowNumber}: ${errorText}`, details || "");
+  }
+
+  function writeBitrixError(rowNumber, bitrixColumn, errorText, details) {
+    sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
+
+    log(`Строка ${rowNumber}: ${errorText}`, details || "");
+    notifyBitrixError(`Строка ${rowNumber}: ${errorText}`, details || "");
   }
 
   function fetchAllDepartments() {
@@ -599,49 +738,94 @@ function processSurveyResults() {
     log(`Последняя заполненная строка по колонке '${SOURCE_DATE_HEADER}': ${lastDataRow}`);
   }
 
-  const firstRowToCheck = Math.max(2, lastDataRow - MAX_ROWS_TO_CHECK + 1);
-  log(`Проверяем последние ${MAX_ROWS_TO_CHECK} записей: строки ${firstRowToCheck}-${lastDataRow}`);
-
-  for (let rowNumber = lastDataRow; rowNumber >= firstRowToCheck; rowNumber--) {
-    const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
-    const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
-    const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
+  function getRowErrorState(rowValues, processedAtValue, bitrixValue, headerIndexMap) {
     const processedAtText = toText(processedAtValue).trim();
     const bitrixText = toText(bitrixValue).trim();
     const hasProcessedAtError = isErrorValue(processedAtValue) || (processedAtText !== "" && !isProcessedAtInExpectedFormat(processedAtValue));
     const hasBitrixError = isErrorValue(bitrixValue);
     const hasMappedFieldError = hasErrorInMappedFields(rowValues, headerIndexMap, responseToHeaderMap);
 
-    const rowHasError = hasProcessedAtError || hasBitrixError || hasMappedFieldError;
+    return {
+      processedAtText,
+      bitrixText,
+      hasProcessedAtError,
+      hasBitrixError,
+      hasMappedFieldError,
+      rowHasError: hasProcessedAtError || hasBitrixError || hasMappedFieldError
+    };
+  }
 
-    if (processedAtText !== "" && hasProcessedAtError) {
+  let rowsToProcess = [];
+
+  if (mode === "errors") {
+    log("Режим обработки", "Все строки с ошибками");
+
+    for (let rowNumber = lastDataRow; rowNumber >= 2; rowNumber--) {
+      const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+      const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
+      const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
+      const errorState = getRowErrorState(rowValues, processedAtValue, bitrixValue, headerIndexMap);
+
+      if (errorState.rowHasError) {
+        rowsToProcess.push(rowNumber);
+      }
+    }
+
+    log("Найдено строк с ошибками для ручной обработки", rowsToProcess.length);
+
+    if (rowsToProcess.length === 0) {
+      log("Строки с ошибками не найдены");
+      return;
+    }
+  } else {
+    const firstRowToCheck = Math.max(2, lastDataRow - MAX_ROWS_TO_CHECK + 1);
+    log(`Проверяем последние ${MAX_ROWS_TO_CHECK} записей: строки ${firstRowToCheck}-${lastDataRow}`);
+
+    for (let rowNumber = lastDataRow; rowNumber >= firstRowToCheck; rowNumber--) {
+      rowsToProcess.push(rowNumber);
+    }
+  }
+
+  for (const rowNumber of rowsToProcess) {
+    const rowValues = sheet.getRange(rowNumber, 1, 1, lastColumn).getValues()[0];
+    const processedAtValue = sheet.getRange(rowNumber, processedAtColumn).getValue();
+    const bitrixValue = sheet.getRange(rowNumber, bitrixColumn).getValue();
+    const errorState = getRowErrorState(rowValues, processedAtValue, bitrixValue, headerIndexMap);
+    const processedAtText = errorState.processedAtText;
+    const bitrixText = errorState.bitrixText;
+    const rowHasError = errorState.rowHasError;
+
+    if (processedAtText !== "" && errorState.hasProcessedAtError) {
       log(`Строка ${rowNumber}: 'Дата обработки' содержит ошибку или неверный формат, повторная обработка`);
     }
 
-    if (bitrixText !== "" && hasBitrixError) {
+    if (bitrixText !== "" && errorState.hasBitrixError) {
       log(`Строка ${rowNumber}: найдена ошибка в 'bitrix', повторная обработка`);
     }
 
-    if (hasMappedFieldError) {
+    if (errorState.hasMappedFieldError) {
       log(`Строка ${rowNumber}: найдена ошибка в полях данных клиента, повторная обработка`);
     }
 
-    if (!rowHasError && processedAtText !== "") {
-      log(`Строка ${rowNumber}: 'Дата обработки' уже заполнена без ошибок, пропуск`);
-      continue;
-    }
+    if (mode !== "errors") {
+      if (!rowHasError && processedAtText !== "") {
+        log(`Строка ${rowNumber}: 'Дата обработки' уже заполнена без ошибок, пропуск`);
+        continue;
+      }
 
-    if (!rowHasError && bitrixText !== "") {
-      log(`Строка ${rowNumber}: колонка 'bitrix' уже заполнена без ошибок, пропуск`);
+      if (!rowHasError && bitrixText !== "") {
+        log(`Строка ${rowNumber}: колонка 'bitrix' уже заполнена без ошибок, пропуск`);
+        continue;
+      }
+    } else if (!rowHasError) {
+      log(`Строка ${rowNumber}: ошибок больше нет, пропуск`);
       continue;
     }
 
     const clientId = toText(sheet.getRange(rowNumber, idColumn).getValue()).trim();
     if (!clientId) {
       const errorText = "Ошибка: пустой id";
-      sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-      sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-      log(`Строка ${rowNumber}: ${errorText}`);
+      writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, "");
       continue;
     }
 
@@ -662,17 +846,13 @@ function processSurveyResults() {
 
       if (!(statusCode >= 200 && statusCode < 300)) {
         const errorText = `Ошибка HTTP ${statusCode}`;
-        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-        sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-        log(`Строка ${rowNumber}: ${errorText}`);
+        writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, responseText || "");
         continue;
       }
 
       if (!responseText) {
         const errorText = "Ошибка: пустой ответ webhook";
-        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-        sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-        log(`Строка ${rowNumber}: ${errorText}`);
+        writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, "");
         continue;
       }
 
@@ -681,17 +861,13 @@ function processSurveyResults() {
         body = JSON.parse(responseText);
       } catch (parseError) {
         const errorText = `Ошибка: некорректный JSON (${parseError})`;
-        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-        sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-        log(`Строка ${rowNumber}: ${errorText}`);
+        writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, responseText);
         continue;
       }
 
       if (!body || typeof body !== "object") {
         const errorText = "Ошибка: webhook вернул некорректный объект";
-        sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-        sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-        log(`Строка ${rowNumber}: ${errorText}`);
+        writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, responseText);
         continue;
       }
 
@@ -713,8 +889,7 @@ function processSurveyResults() {
           log(`Строка ${rowNumber}: задача создана`, taskResult);
         } catch (taskError) {
           const taskErrorText = `Ошибка Bitrix: ${taskError}`;
-          sheet.getRange(rowNumber, bitrixColumn).setValue(taskErrorText);
-          log(`Строка ${rowNumber}: ${taskErrorText}`);
+          writeBitrixError(rowNumber, bitrixColumn, taskErrorText, "");
         }
       } else {
         sheet.getRange(rowNumber, bitrixColumn).setValue("не требуется");
@@ -726,9 +901,7 @@ function processSurveyResults() {
       log(`Строка ${rowNumber}: данные записаны, timestamp установлен`);
     } catch (error) {
       const errorText = `Ошибка запроса: ${error}`;
-      sheet.getRange(rowNumber, processedAtColumn).setValue(errorText);
-      sheet.getRange(rowNumber, bitrixColumn).setValue(errorText);
-      log(`Строка ${rowNumber}: ${errorText}`);
+      writeProcessingError(rowNumber, processedAtColumn, bitrixColumn, errorText, "");
     }
   }
 
@@ -738,6 +911,7 @@ function processSurveyResults() {
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("Интеграции")
-    .addItem("Обработать", "processSurveyResults")
+    .addItem("Обработать последние строки", "processSurveyResults")
+    .addItem("Обработать все строки с ошибками", "processSurveyResultErrorRows")
     .addToUi();
 }
